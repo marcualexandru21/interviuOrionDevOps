@@ -1,0 +1,133 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: bootcamp-cluster
+  region: eu-central-1
+  version: "1.37"
+
+  tags:
+    Environment: "Demo"
+    Project: "Network-Intelligence"
+    Owner: "platform-team"
+
+# =========================================================================
+# Endpoint-ul API Kubernetes
+# privateAccess: true  -> nodurile (privateNetworking) și traficul din VPC folosesc endpoint-ul privat.
+# publicAccess: true   -> necesar pentru administrare și pentru Jenkins (EC2 în afara VPC-ului clusterului),
+#                         dar restricționat la IP-urile din publicAccessCIDRs, nu 0.0.0.0/0.
+# Valorile de mai jos sunt din intervalul de documentație (RFC 5737): se înlocuiesc cu IP-ul
+# de egress al administratorului/VPN-ului și IP-ul public (Elastic IP) al Jenkins.
+# Pe un cluster existent: eksctl utils set-public-access-cidrs -f k8s/cluster-config.yaml --approve
+# Producție: publicAccess: false, acces doar prin VPN / bastion / SSM.
+# =========================================================================
+vpc:
+  nat:
+    gateway: Single  # un singur NAT gateway (cost); producție: unul per AZ
+  clusterEndpoints:
+    publicAccess: true
+    privateAccess: true
+  publicAccessCIDRs:
+    - "203.0.113.10/32"   # admin / VPN egress
+    - "203.0.113.20/32"   # Jenkins (Elastic IP)
+
+# 1. Securizarea Control Plane-ului (KMS Encryption)
+# CE SE STRICĂ DACĂ LIPSEȘTE: Secretele Kubernetes stau în clear-text pe discurile etcd administrate de AWS.
+secretsEncryption:
+  keyARN: "arn:aws:kms:eu-central-1:216989107224:key/02388489-f2e1-4cd7-af7a-f2b2889a58e2"
+
+# Logurile control plane-ului: necesare pentru audit, compliance și troubleshooting.
+cloudWatch:
+  clusterLogging:
+    enableTypes: ["api", "audit", "authenticator", "controllerManager", "scheduler"]
+
+iam:
+  withOIDC: true
+  serviceAccounts:
+    - metadata:
+        name: cluster-autoscaler
+        namespace: kube-system
+      # IRSA (IAM Roles for Service Accounts): politica proprie, cu condiție pe tag-ul clusterului,
+      # în locul wellKnownPolicies (prea largi). Permisiunea aparține doar pod-ului autoscaler-ului.
+      attachPolicyARNs:
+        - "arn:aws:iam::216989107224:policy/AmazonEKSClusterAutoscalerPolicy"
+
+# =========================================================================
+# Maparea identitatilor externe (AWS IAM) la Kubernetes RBAC
+# DE CE FACEM ASTA: Pentru a elimina execuția manuală de comenzi
+# (eksctl create iamidentitymapping). Astfel, la o reconstrucție a clusterului
+# în caz de Disaster Recovery, permisiunile pentru CI/CD sunt aplicate automat,
+# iar accesul este auditabil direct din istoricul Git.
+# =========================================================================
+accessConfig:
+  authenticationMode: API_AND_CONFIG_MAP
+  accessEntries:
+    - principalARN: arn:aws:iam::216989107224:role/Jenkins-EKS-ECR-Role
+      kubernetesUsername: jenkins-pipeline
+      kubernetesGroups:
+        - cicd-deployers
+
+addons:
+  - name: aws-ebs-csi-driver
+    # Aici folosim IRSA. Permisiunea e dată doar POD-ului de CSI, nu nodului!
+    wellKnownPolicies:
+      ebsCSIController: true
+
+managedNodeGroups:
+  # Aplicatii + monitorizare (pyapp, Prometheus, Grafana, Cluster Autoscaler, CoreDNS).
+  # O singura zona: volumele EBS (Prometheus/Grafana) nu pot trece intre AZ-uri.
+  # Fara taint: componentele de sistem (CoreDNS, metrics-server, ebs-csi-controller) trebuie sa aiba unde rula.
+  - name: app-nodes
+    # t3.large: 8 GiB și max 35 pod-uri/nod (limita ENI/IP a VPC CNI; t3.medium are doar 17).
+    instanceType: t3.large
+    availabilityZones: ["eu-central-1a"]
+    minSize: 1
+    maxSize: 3
+    desiredCapacity: 1
+    labels:
+      workload: apps
+    propagateASGTags: true
+    volumeType: gp3
+    volumeSize: 30
+    # Doar IP-uri private; discuri criptate; fără SSH (acces prin SSM Session Manager)
+    privateNetworking: true
+    volumeEncrypted: true
+    # Fără withAddonPolicies.autoScaler: drepturile de autoscaling sunt doar pe pod-ul
+    # autoscaler-ului (IRSA). Pe rolul nodului, orice pod de pe nod ar putea porni/opri instanțe.
+    iam:
+      attachPolicyARNs:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  # Date (Kafka, Elasticsearch, Logstash, Kibana). Aceeasi zona ca app-nodes.
+  # Taint: nimic nu ajunge aici fara toleration explicita. minSize 0 = il poti opri cand nu lucrezi.
+  - name: data-nodes
+    instanceType: t3.large
+    availabilityZones: ["eu-central-1a"]
+    minSize: 0
+    maxSize: 1
+    desiredCapacity: 1
+    labels:
+      workload: data
+    taints:
+      - key: dedicated
+        value: data
+        effect: NoSchedule
+    propagateASGTags: true
+    volumeType: gp3
+    volumeSize: 30
+    privateNetworking: true
+    volumeEncrypted: true
+    iam:
+      attachPolicyARNs:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+#fargateProfiles:
+#  - name: stateless-apps-profile
+#    selectors:
+#      - namespace: fargate-apps

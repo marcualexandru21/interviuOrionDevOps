@@ -1,0 +1,82 @@
+prometheus:
+  prometheusSpec:
+    # 1. Păstrăm metricele doar 15 zile pe discul scump. Restul s-ar duce în S3 (via Thanos).
+    retention: 15d
+    nodeSelector:
+      workload: apps
+
+    # 2. Resurse stricte (Protejăm nodurile de "Noisy Neighbors")
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: "gp3-storage"
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+    # În producție am adăuga:
+    # replicas: 2
+    # podAntiAffinity: ... (să fie pe AZ-uri diferite)
+
+alertmanager:
+  alertmanagerSpec:
+    # Configurația vine din Prometheus/alertmanager.yaml (Secret 'alertmanager-config'),
+    # nu din values: fișierul de configurare nu conține credențiale.
+    configSecret: alertmanager-config
+    # Credențialele, montate în /etc/alertmanager/secrets/alertmanager-credentials/
+    secrets:
+      - alertmanager-credentials
+    nodeSelector:
+      workload: apps
+    # Alertmanager folosește foarte puține resurse, dar îi setăm limite pentru siguranță.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: "gp3-storage"
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 2Gi
+
+grafana:
+  nodeSelector:
+    workload: apps
+  # Protecție pentru Grafana
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  persistence:
+    enabled: true
+    storageClassName: "gp3-storage"
+    size: 5Gi
+
+# Operatorul si kube-state-metrics stau tot pe app-nodes.
+# node-exporter (DaemonSet) NU primeste nodeSelector: trebuie sa ruleze pe toate nodurile,
+# inclusiv pe data-nodes (chart-ul are implicit toleration pentru orice taint NoSchedule).
+prometheusOperator:
+  nodeSelector:
+    workload: apps
+
+kube-state-metrics:
+  nodeSelector:
+    workload: apps

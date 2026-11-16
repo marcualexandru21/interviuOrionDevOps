@@ -1,0 +1,163 @@
+# =============================================================================
+# Fluent Bit (chart fluent/fluent-bit) - DaemonSet în namespace-ul logging.
+# Citește logurile JSON ale pyapp de pe nod, adaugă metadate Kubernetes și le trimite
+# în Kafka prin TLS cu certificat de client (KafkaUser fluent-bit-producer).
+#   level=ERROR      -> topic 5g-network-errors
+#   restul           -> topic 5g-network-logs
+# =============================================================================
+kind: DaemonSet
+
+# Agent de nod: nu are voie să rămână Pending pe un nod plin (limită de pod-uri sau resurse).
+# Cu prioritatea maximă, scheduler-ul evacuează un pod cu prioritate mică, care este
+# reprogramat pe alt nod. Aceeași clasă ca aws-node și kube-proxy.
+priorityClassName: system-node-critical
+
+# Rulează pe toate nodurile, inclusiv pe data-nodes (taint dedicated=data).
+tolerations:
+  - operator: Exists
+    effect: NoSchedule
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# Root este necesar doar pentru citirea /var/log/pods (fișiere root, 0640).
+# Fără capabilități, fără escaladare, root filesystem read-only.
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+
+testFramework:
+  enabled: false
+
+extraVolumes:
+  # Stare pe nod: poziția în fișiere (DB) și buffer-ul pe disc când Kafka nu e disponibil.
+  - name: state
+    hostPath:
+      path: /var/fluent-bit/state
+      type: DirectoryOrCreate
+  # CA-ul clusterului Kafka (certificat public), sincronizat de Kafka/sync-cluster-ca.sh.
+  - name: kafka-cluster-ca
+    secret:
+      secretName: kafka-cluster-ca
+  # Certificatul de client, creat de Strimzi User Operator din KafkaUser fluent-bit-producer.
+  - name: kafka-user
+    secret:
+      secretName: fluent-bit-producer
+
+extraVolumeMounts:
+  - name: state
+    mountPath: /var/fluent-bit/state
+  - name: kafka-cluster-ca
+    mountPath: /fluent-bit/kafka/ca
+    readOnly: true
+  - name: kafka-user
+    mountPath: /fluent-bit/kafka/user
+    readOnly: true
+
+config:
+  service: |
+    [SERVICE]
+        Daemon                    Off
+        Flush                     1
+        Log_Level                 info
+        Parsers_File              /fluent-bit/etc/parsers.conf
+        Parsers_File              /fluent-bit/etc/conf/custom_parsers.conf
+        HTTP_Server               On
+        HTTP_Listen               0.0.0.0
+        HTTP_Port                 2020
+        Health_Check              On
+        storage.path              /var/fluent-bit/state/flb-storage/
+        storage.sync              normal
+        storage.checksum          off
+        storage.backlog.mem_limit 16M
+
+  inputs: |
+    # Doar containerul pyapp din telecom-apps: <pod>_<namespace>_<container>-<id>.log
+    [INPUT]
+        Name              tail
+        Tag               kube.*
+        Path              /var/log/containers/*_telecom-apps_pyapp-*.log
+        multiline.parser  cri, docker
+        DB                /var/fluent-bit/state/flb_kube.db
+        Mem_Buf_Limit     16MB
+        storage.type      filesystem
+        Skip_Long_Lines   On
+        Refresh_Interval  10
+
+  filters: |
+    # Metadate Kubernetes (pod, namespace, labels). Merge_Log parsează JSON-ul aplicației
+    # și pune câmpurile (level, slice_id, gnb_id, latency_ms...) la rădăcina înregistrării.
+    [FILTER]
+        Name                kubernetes
+        Match               kube.*
+        Kube_Tag_Prefix     kube.var.log.containers.
+        Merge_Log           On
+        Keep_Log            Off
+        K8S-Logging.Parser  On
+        K8S-Logging.Exclude On
+        Labels              On
+        Annotations         Off
+
+    # Câmpuri tehnice ale formatului CRI, fără valoare în analiză.
+    [FILTER]
+        Name    modify
+        Match   kube.*
+        Remove  stream
+        Remove  _p
+
+    # Evenimentele ERROR primesc tag-ul errors.* și merg în topicul de erori (keep=false: nu se duplică).
+    [FILTER]
+        Name                   rewrite_tag
+        Match                  kube.*
+        Rule                   $level ^ERROR$ errors.$TAG false
+        Emitter_Name           errors_emitter
+        Emitter_Storage.type   filesystem
+        Emitter_Mem_Buf_Limit  8M
+
+  outputs: |
+    [OUTPUT]
+        Name                             kafka
+        Match                            kube.*
+        Brokers                          orion-kafka-kafka-bootstrap.kafka.svc:9093
+        Topics                           5g-network-logs
+        Message_Key_Field                gnb_id
+        Format                           json
+        Timestamp_Key                    @timestamp
+        Timestamp_Format                 iso8601
+        Retry_Limit                      no_limits
+        storage.total_limit_size         256M
+        rdkafka.security.protocol        ssl
+        rdkafka.ssl.ca.location          /fluent-bit/kafka/ca/ca.crt
+        rdkafka.ssl.certificate.location /fluent-bit/kafka/user/user.crt
+        rdkafka.ssl.key.location         /fluent-bit/kafka/user/user.key
+        rdkafka.request.required.acks    -1
+        rdkafka.compression.codec        lz4
+        rdkafka.queue.buffering.max.ms   500
+        rdkafka.message.timeout.ms       60000
+
+    [OUTPUT]
+        Name                             kafka
+        Match                            errors.*
+        Brokers                          orion-kafka-kafka-bootstrap.kafka.svc:9093
+        Topics                           5g-network-errors
+        Message_Key_Field                gnb_id
+        Format                           json
+        Timestamp_Key                    @timestamp
+        Timestamp_Format                 iso8601
+        Retry_Limit                      no_limits
+        storage.total_limit_size         64M
+        rdkafka.security.protocol        ssl
+        rdkafka.ssl.ca.location          /fluent-bit/kafka/ca/ca.crt
+        rdkafka.ssl.certificate.location /fluent-bit/kafka/user/user.crt
+        rdkafka.ssl.key.location         /fluent-bit/kafka/user/user.key
+        rdkafka.request.required.acks    -1
+        rdkafka.compression.codec        lz4
+        rdkafka.queue.buffering.max.ms   500
+        rdkafka.message.timeout.ms       60000

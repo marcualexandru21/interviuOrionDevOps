@@ -1,0 +1,80 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: pyapp-alerts
+  namespace: telecom-apps
+  labels:
+    # OBLIGATORIU: Fără acest label care corespunde cu Helm-ul (ex: release: monitoring),
+    # Prometheus Operator va ignora complet acest fișier (Failure mode: Silențiere totală).
+    release: monitoring
+spec:
+  groups:
+    - name: pyapp-availability
+      rules:
+
+        # =========================================================================
+        # 1. DISPONIBILITATEA SERVICIULUI (CRITICAL) - VERSIUNEA HA
+        # =========================================================================
+        - alert: PyAppServiceDegraded
+          # DE CE AȘA (LOGICĂ DE PRODUCȚIE HA):
+          # - absent(...): Acoperă cazul în care podurile sunt șterse complet, scalate la 0
+          #   sau serviciul a dispărut din Kubernetes.
+          # - sum(up) / count(up) < 0.5: Avem mai puțin de 50% din pod-uri funcționale.
+          #   Într-o bancă, un singur pod down nu este critic dacă ai replici. Alertăm critic
+          #   doar dacă majoritatea replicilor au căzut și clienții sunt afectați.
+          expr: >
+            absent(up{job="pyapp-service", namespace="telecom-apps"})
+            or
+            (
+              sum by (job, namespace) (up{job="pyapp-service", namespace="telecom-apps"})
+              /
+              count by (job, namespace) (up{job="pyapp-service", namespace="telecom-apps"})
+            ) < 0.5
+          for: 2m
+          labels:
+            severity: critical
+            team: telecom-backend
+          annotations:
+            summary: "Disponibilitate critică pentru pyapp-service (< 50% pod-uri active)"
+            description: "Serviciul a pierdut majoritatea replicilor sau este complet jos. Clienții primesc erori de conexiune."
+            # Orice alertă trebuie să aibă instrucțiuni de intervenție.
+            runbook_url: "https://wiki.telecom.local/runbooks/pyapp/service-degraded"
+
+        # =========================================================================
+        # 1.1 UN SINGUR POD PICAT (WARNING)
+        # =========================================================================
+        - alert: PyAppSinglePodDown
+          # LOGICĂ DE PRODUCȚIE:
+          # Vrem totuși să știm dacă un pod izolat e jos.
+          # - up(...) == 0: Acoperă cazul în care Podul rulează, dar aplicația face freeze
+          #   (ex: deadlock pe baza de date) și Prometheus primește timeout la scrape.
+          # Punem severitate "warning" ca să nu trezească omul noaptea. K8s (self-healing) ar trebui să-l restarteze.
+          expr: up{job="pyapp-service", namespace="telecom-apps"} == 0
+          for: 5m
+          labels:
+            severity: warning
+            team: telecom-backend
+          annotations:
+            summary: "Pod-ul {{ $labels.instance }} este down"
+            description: "Unul dintre pod-urile serviciului nu răspunde de 5 minute. Kubernetes ar trebui să îl restarteze."
+            runbook_url: "https://wiki.telecom.local/runbooks/pyapp/pod-troubleshooting"
+
+        # =========================================================================
+        # 3. SATURAȚIA MEMORIEI - PREVENȚIE OOM KILLED (WARNING)
+        # =========================================================================
+        - alert: PyAppHighMemoryUsage
+          # DE CE AȘA:
+          # - container_memory_working_set_bytes: Este metrica reală folosită de Kubernetes pentru OOM (exclude cache-ul eliberabil).
+          # - > 0 la limit_bytes: Dacă un dezvoltator uită să declare 'resources.limits.memory' în Deployment, limita va fi 0.
+          #   Fără '> 0', vei avea 'Division by Zero' și PromQL va crăpa în tăcere.
+          # - pod!="": la restartul unui pod, cAdvisor raportează pentru scurt timp serii fără label-ul pod
+          #   (agregate la nivel de cgroup), care ar produce alerte false. Filtrul le exclude.
+          expr: sum by (pod) (container_memory_working_set_bytes{namespace="telecom-apps", container="pyapp", pod!=""}) / sum by (pod) (container_spec_memory_limit_bytes{namespace="telecom-apps", container="pyapp", pod!=""} > 0) * 100 > 85
+          for: 5m
+          labels:
+            severity: warning
+            team: telecom-backend
+          annotations:
+            summary: "Pod-ul {{ $labels.pod }} consumă peste 85% din memorie"
+            description: "Posibil memory leak în aplicația Python. Investigați înainte ca procesul să fie terminat forțat (OOMKilled)."
+            runbook_url: "https://wiki.telecom.local/runbooks/pyapp/memory-leak-investigation"

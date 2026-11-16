@@ -1,0 +1,46 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3-storage
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true" # K8s va folosi gp3 pentru orice PVC care nu cere o clasă specifică
+provisioner: ebs.csi.aws.com
+reclaimPolicy: Retain        # Discul EBS NU se sterge cand se sterge PVC-ul sau clusterul
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true   # Permite mărirea discului on-the-fly (fără restart la Pod)
+parameters:
+  type: gp3
+  fsType: ext4
+  encrypted: "true"          # Activează criptarea AWS KMS pentru securitate
+
+# ==============================================================================
+# NOTĂ DE ARHITECTURĂ:
+#
+# 1. volumeBindingMode: WaitForFirstConsumer
+#    De ce? Forțează AWS-ul să creeze discul EBS exact în aceeași zonă de
+#    disponibilitate (AZ) în care este programat Pod-ul să ruleze (ex: eu-central-1a).
+#    Dacă folosești Immediate, AWS face discul instant într-o zonă aleatorie, iar
+#    dacă Pod-ul e programat în altă zonă, K8s dă eroare de atașare (EBS-urile nu
+#    pot traversa AZ-urile).
+#
+# 2. encrypted: "true"
+#    De ce? Conform standardelor de securitate din mediul financiar (PCI-DSS)
+#    și Telecom, absolut toate datele trebuie criptate "at rest".
+#    Acest flag cere driverului CSI să cripteze EBS-ul cu cheia KMS default a AWS.
+#
+# 3. allowVolumeExpansion: true
+#    De ce? Pentru rezolvarea incidentelor fără downtime. Dacă un volum
+#    (ex: baza de date sau Prometheus) atinge 99% spațiu, putem edita
+#    PVC-ul ca să cerem mai mult spațiu (ex: de la 10Gi la 20Gi). K8s și AWS
+#    vor redimensiona partiția "la cald" (on-the-fly), fără să omoare Pod-ul.
+#
+# 4. reclaimPolicy: Retain
+#    De ce? Cu Delete (default), stergerea PVC-ului sterge si discul EBS: un
+#    'kubectl delete' gresit sau un 'helm uninstall' inseamna pierdere de date.
+#    Cu Retain, PV-ul trece in starea 'Released' si discul ramane in AWS, de unde
+#    poate fi reatasat sau folosit pentru snapshot. Costul: volumele ramase trebuie
+#    curatate manual (aws ec2 describe-volumes --filters Name=status,Values=available).
+#    In productie se combina cu snapshot-uri programate (AWS Backup / VolumeSnapshot),
+#    pentru ca Retain protejeaza doar impotriva stergerii, nu si a coruperii datelor.
+#    Nota: reclaimPolicy este imutabil pe un StorageClass (se aplica prin delete + apply).
+# ==============================================================================

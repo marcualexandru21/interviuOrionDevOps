@@ -1,0 +1,17 @@
+# ECK operator (chart elastic/eck-operator), instalat în namespace-ul elastic-system.
+
+# Operatorul gestionează doar namespace-ul logging, nu tot clusterul (least privilege).
+managedNamespaces:
+  - logging
+
+# Componentă de control, nu de date: stă pe app-nodes.
+nodeSelector:
+  workload: apps
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 150Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

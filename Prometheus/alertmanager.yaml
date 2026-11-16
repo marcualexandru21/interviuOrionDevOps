@@ -1,0 +1,103 @@
+# =======================================================================
+# Configurația Alertmanager (fără secrete).
+# Se încarcă în cluster ca Secret-ul 'alertmanager-config' (cheia alertmanager.yaml),
+# referit din Prometheus/values.yaml prin alertmanagerSpec.configSecret.
+# Credențialele (parolă SMTP, cheie PagerDuty, webhook Slack) stau în Secret-ul separat
+# 'alertmanager-credentials', montat de operator în
+# /etc/alertmanager/secrets/alertmanager-credentials/ și citit prin câmpurile *_file.
+# Crearea celor două Secrete: vezi README.md, secțiunea Alerting.
+# =======================================================================
+
+global:
+  resolve_timeout: 5m
+
+  # --- Configurație Globală SMTP ---
+  smtp_smarthost: 'smtp.telecom-lab.example:587'
+  smtp_from: 'alertmanager@telecom-lab.example'
+  smtp_auth_username: 'alertmanager@telecom-lab.example'
+  smtp_auth_password_file: '/etc/alertmanager/secrets/alertmanager-credentials/smtp-password'
+  smtp_require_tls: true
+
+route:
+  # =======================================================================
+  # GROUPING (ANTI-SPAM)
+  # =======================================================================
+  group_by: ['alertname', 'namespace', 'service', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  # Default route (pentru alerte care nu au label-ul 'severity' setat)
+  receiver: 'slack-medium'
+
+  routes:
+    # 1. CRITICAL -> Sună telefonul! (PagerDuty)
+    - matchers:
+        - severity="critical"
+      receiver: 'pagerduty-critical'
+
+    # 2. HIGH -> Trimite Email
+    - matchers:
+        - severity="high"
+      receiver: 'email-high'
+
+    # 3. MEDIUM / WARNING -> Trimite pe Slack
+    - matchers:
+        - severity=~"medium|warning"
+      receiver: 'slack-medium'
+
+# =======================================================================
+# INHIBITION RULES (Regulile de liniște)
+# =======================================================================
+inhibit_rules:
+  # 1. O alertă CRITICAL suprimă automat orice alertă High, Medium sau Warning
+  # de pe același serviciu. Când cade baza de date cu CRITICAL, nu mă interesează
+  # alerta de WARNING că merge greu query-ul.
+  - source_matchers:
+      - severity="critical"
+    target_matchers:
+      - severity=~"high|medium|warning"
+    equal: ['namespace', 'job']
+
+  # 2. O alertă HIGH suprimă alertele Medium și Warning
+  - source_matchers:
+      - severity="high"
+    target_matchers:
+      - severity=~"medium|warning"
+    equal: ['namespace', 'job']
+
+# =======================================================================
+# RECEIVERS
+# =======================================================================
+receivers:
+  # --- 1. RECEIVER PAGERDUTY (CRITICAL) ---
+  - name: 'pagerduty-critical'
+    pagerduty_configs:
+      - routing_key_file: '/etc/alertmanager/secrets/alertmanager-credentials/pagerduty-routing-key'
+        send_resolved: true
+        severity: 'critical'
+        description: '[CRITICAL] {{ .CommonAnnotations.summary }}'
+        details:
+          runbook: '{{ .CommonAnnotations.runbook_url }}'
+          description: '{{ .CommonAnnotations.description }}'
+
+  # --- 2. RECEIVER EMAIL (HIGH) ---
+  - name: 'email-high'
+    email_configs:
+      - to: 'oncall-backend@telecom-lab.example'
+        send_resolved: true
+        html: |
+          <h3>Alertă K8s: {{ .CommonAnnotations.summary }}</h3>
+          <p><strong>Detalii:</strong> {{ .CommonAnnotations.description }}</p>
+          <p><strong>Runbook:</strong> <a href="{{ .CommonAnnotations.runbook_url }}">Cum să rezolvi problema</a></p>
+
+  # --- 3. RECEIVER SLACK (MEDIUM / WARNING) ---
+  - name: 'slack-medium'
+    slack_configs:
+      - api_url_file: '/etc/alertmanager/secrets/alertmanager-credentials/slack-webhook-url'
+        channel: '#telecom-alerts'
+        send_resolved: true
+        title: '[{{ .Status | toUpper }}] {{ .CommonAnnotations.summary }}'
+        text: >-
+          *Detalii:* {{ .CommonAnnotations.description }}
+          *Runbook:* {{ .CommonAnnotations.runbook_url }}

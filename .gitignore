@@ -1,0 +1,19 @@
+# IDE / editor
+*.iml
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.env
+
+# Local secrets and overrides: never committed
+.secrets/
+*.local.yaml
+*.local.yml
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,49 @@
+# =============================================================================
+# Topicurile pentru logurile pyapp (5g-session-analyzer).
+# Fluent Bit scrie evenimentele normale în 5g-network-logs și pe cele cu level=ERROR
+# în 5g-network-errors. Cheia mesajului este gnb_id: toate evenimentele unei antene
+# ajung în aceeași partiție, deci ordinea lor se păstrează.
+#
+# Dimensionare disc (volum Kafka 15 GiB):
+#   5g-network-logs   3 partiții x 2 GiB   = 6 GiB
+#   5g-network-errors 3 partiții x 512 MiB = 1.5 GiB
+#   rest: segmente active, metadate KRaft, __consumer_offsets
+# =============================================================================
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: 5g-network-logs
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: orion-kafka
+spec:
+  # 3 partiții = până la 3 consumatori paraleli în același consumer group.
+  partitions: 3
+  replicas: 1                     # lab, 1 broker (producție: 3)
+  config:
+    cleanup.policy: delete
+    retention.ms: 21600000        # 6h: buffer între colectare și indexare, nu arhivă
+    retention.bytes: 2147483648   # 2 GiB / partiție
+    segment.ms: 3600000           # segmentul activ se închide la 1h: retenția se aplică și la trafic mic
+    segment.bytes: 268435456      # 256 MiB
+    compression.type: lz4         # loguri JSON redundante, cost CPU mic
+    min.insync.replicas: 1
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: 5g-network-errors
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: orion-kafka
+spec:
+  partitions: 3
+  replicas: 1
+  config:
+    cleanup.policy: delete
+    retention.ms: 86400000        # 24h: erorile se păstrează mai mult pentru investigarea incidentelor
+    retention.bytes: 536870912    # 512 MiB / partiție
+    segment.ms: 3600000
+    segment.bytes: 67108864       # 64 MiB: volum mic, segmente mici
+    compression.type: lz4
+    min.insync.replicas: 1

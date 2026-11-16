@@ -1,0 +1,61 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: pyapp-business-alerts
+  namespace: telecom-apps
+  labels:
+    release: monitoring
+spec:
+  groups:
+    - name: pyapp.business.rules
+      rules:
+
+        # =========================================================================
+        # 1. LATENȚĂ MARE PE ECHIPAMENTUL RADIO (gNodeB)
+        # =========================================================================
+        - alert: HighRANLatency
+          expr: max by (gnb_id, slice_id) (network_latency_ms{service="pyapp-service"}) > 150
+          for: 3m
+          labels:
+            severity: critical
+            team: telecom-ran
+          annotations:
+            summary: "Latență critică pe antena {{ $labels.gnb_id }} (Slice: {{ $labels.slice_id }})"
+            description: "Latența a depășit 150ms constant timp de 3 minute. Valoarea maximă observată: {{ $value }}ms."
+            runbook_url: "https://kibana.telecom.local/app/discover?query=gnb_id:{{ $labels.gnb_id }}"
+
+        # =========================================================================
+        # 2. RATA DE LOG-URI "ERROR" CRESCUTĂ (Error Ratio)
+        # =========================================================================
+        - alert: HighApplicationErrorLogs
+          expr: >
+            (
+              sum by (slice_id) (rate(session_events_total{service="pyapp-service", level="ERROR"}[5m]))
+              /
+              sum by (slice_id) (rate(session_events_total{service="pyapp-service"}[5m]))
+            ) > 0.05
+            and sum by (slice_id) (rate(session_events_total{service="pyapp-service"}[5m])) > 1
+          for: 5m
+          labels:
+            severity: warning
+            team: telecom-backend
+          annotations:
+            summary: "Rata logurilor de ERROR a depășit 5% pe slice-ul {{ $labels.slice_id }}"
+            description: "Multe erori de procesare relative la volumul de trafic. Verificați logurile în Kibana."
+            runbook_url: "https://kibana.telecom.local/app/discover?query=level:ERROR AND slice_id:{{ $labels.slice_id }}"
+
+        # =========================================================================
+        # 3. DROP MASIV DE CONEXIUNI UE (User Equipment)
+        # =========================================================================
+        - alert: MassiveUEDrop
+          expr: >
+            max by (gnb_id, slice_id) (active_ue_connections{service="pyapp-service"}) < 100
+            and max_over_time(max by (gnb_id, slice_id) (active_ue_connections{service="pyapp-service"})[1h:1m]) > 1000
+          for: 2m
+          labels:
+            severity: critical
+            team: telecom-ran
+          annotations:
+            summary: "Deconectare masivă pe {{ $labels.gnb_id }} (Slice: {{ $labels.slice_id }})"
+            description: "Numărul de conexiuni a scăzut brusc la {{ $value }}. Antena era activă recent."
+            runbook_url: "https://wiki.telecom.local/runbooks/5g/ue-drop"

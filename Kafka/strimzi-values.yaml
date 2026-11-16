@@ -1,0 +1,25 @@
+# Strimzi Cluster Operator (chart strimzi/strimzi-kafka-operator), instalat în namespace-ul kafka.
+
+# Operatorul urmărește implicit namespace-ul în care e instalat (kafka).
+# logging este adăugat pentru User Operator (KafkaUser-ii clienților stau acolo).
+watchNamespaces:
+  - logging
+
+# Strimzi 1.3.x: Topic/User Operator într-un alt namespace decât clusterul Kafka este dezactivat
+# implicit. Îl activăm explicit: User Operator creează Secret-ele cu certificatele clienților
+# direct în logging, deci cheile private nu sunt copiate între namespace-uri.
+extraEnvs:
+  - name: STRIMZI_ENTITY_OPERATOR_WATCHED_NAMESPACE_ENABLED
+    value: "true"
+
+# Operatorul este o componentă de control, nu de date: stă pe app-nodes.
+nodeSelector:
+  workload: apps
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 384Mi
+  limits:
+    cpu: 1000m
+    memory: 384Mi

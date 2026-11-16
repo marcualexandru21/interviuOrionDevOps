@@ -1,0 +1,171 @@
+# =============================================================================
+# Logstash: consumă din Kafka (mTLS, consumer group logstash-es) și scrie în
+# Elasticsearch (TLS, utilizator logstash_writer) în data stream-ul 5g-network.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logstash-config
+  namespace: logging
+data:
+  logstash.yml: |
+    api.http.host: "0.0.0.0"
+    pipeline.workers: 1
+    pipeline.ordered: auto
+    xpack.monitoring.enabled: false
+  pipeline.conf: |
+    input {
+      kafka {
+        bootstrap_servers       => "orion-kafka-kafka-bootstrap.kafka.svc:9093"
+        topics                  => ["5g-network-logs", "5g-network-errors"]
+        group_id                => "logstash-es"
+        client_id               => "logstash-es"
+        # 1 thread în lab. Scalare: până la 3 consumatori (= nr. de partiții) în același grup.
+        consumer_threads        => 1
+        # La prima pornire a grupului citește de la începutul retenției, nu doar mesajele noi.
+        auto_offset_reset       => "earliest"
+        codec                   => "json"
+        decorate_events         => "basic"
+        security_protocol       => "SSL"
+        ssl_truststore_type     => "PEM"
+        ssl_truststore_location => "/certs/kafka-ca/ca.crt"
+        ssl_keystore_type       => "PKCS12"
+        ssl_keystore_location   => "/certs/kafka-user/user.p12"
+        ssl_keystore_password   => "${KAFKA_KEYSTORE_PASSWORD}"
+      }
+    }
+
+    filter {
+      mutate {
+        # Topicul sursă devine câmp: în Kibana se poate filtra logs vs errors.
+        add_field    => { "[kafka][topic]" => "%{[@metadata][kafka][topic]}" }
+        # Câmpuri redundante sau fără valoare de analiză. event.original este o copie
+        # integrală a mesajului (ECS) care ar dubla spațiul ocupat în index.
+        remove_field => [ "time", "[event][original]",
+                          "[kubernetes][docker_id]", "[kubernetes][container_hash]", "[kubernetes][pod_id]" ]
+      }
+    }
+
+    output {
+      elasticsearch {
+        hosts                       => ["https://logs-es-http.logging.svc:9200"]
+        user                        => "logstash_writer"
+        password                    => "${LOGSTASH_ES_PASSWORD}"
+        ssl_enabled                 => true
+        ssl_certificate_authorities => ["/certs/es/ca.crt"]
+        # Data stream creat automat pe baza index template-ului 5g-network* (es-bootstrap).
+        index                       => "5g-network"
+        action                      => "create"
+        data_stream                 => "false"
+        manage_template             => false
+        ilm_enabled                 => false
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logstash
+  namespace: logging
+  labels:
+    app: logstash
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: logstash
+  template:
+    metadata:
+      labels:
+        app: logstash
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: workload
+                    operator: In
+                    values: ["data"]
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: data
+          effect: NoSchedule
+      containers:
+        - name: logstash
+          image: docker.elastic.co/logstash/logstash:9.5.6
+          # Fără readOnlyRootFilesystem: entrypoint-ul imaginii Logstash scrie în config/ la pornire.
+          # Compensat prin: non-root, drop ALL, fără escaladare; date doar în emptyDir.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: LS_JAVA_OPTS
+              value: "-Xms384m -Xmx384m"
+            - name: KAFKA_KEYSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: logstash-consumer      # creat de Strimzi User Operator
+                  key: user.password
+            - name: LOGSTASH_ES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: logstash-es-writer
+                  key: password
+          ports:
+            - name: api
+              containerPort: 9600
+          readinessProbe:
+            httpGet:
+              path: /
+              port: api
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 768Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          volumeMounts:
+            - name: config
+              mountPath: /usr/share/logstash/config/logstash.yml
+              subPath: logstash.yml
+            - name: config
+              mountPath: /usr/share/logstash/pipeline/logstash.conf
+              subPath: pipeline.conf
+            - name: data
+              mountPath: /usr/share/logstash/data
+            - name: kafka-ca
+              mountPath: /certs/kafka-ca
+              readOnly: true
+            - name: kafka-user
+              mountPath: /certs/kafka-user
+              readOnly: true
+            - name: es-ca
+              mountPath: /certs/es
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: logstash-config
+        - name: data
+          emptyDir: {}
+        - name: kafka-ca
+          secret:
+            secretName: kafka-cluster-ca
+        - name: kafka-user
+          secret:
+            secretName: logstash-consumer
+        - name: es-ca
+          secret:
+            secretName: logs-es-http-certs-public

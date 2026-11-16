@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pyapp-deployment
+  namespace: telecom-apps
+  labels:
+    app: pyapp
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: pyapp
+  template:
+    metadata:
+      labels:
+        app: pyapp
+    spec:
+      # Aplicația nu apelează API-ul Kubernetes: nu primește token de ServiceAccount.
+      automountServiceAccountToken: false
+      nodeSelector:
+        workload: apps
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pyapp
+          image: 216989107224.dkr.ecr.eu-central-1.amazonaws.com/intervieworion/pyapp:LATEST_TAG_PLACEHOLDER
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 8000
+            periodSeconds: 5
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pyapp-pdb
+  namespace: telecom-apps
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: pyapp
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pyapp-service
+  namespace: telecom-apps
+  labels:
+    app: pyapp
+spec:
+  selector:
+    app: pyapp
+  ports:
+    - name: port-svc-pyapp
+      protocol: TCP
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP

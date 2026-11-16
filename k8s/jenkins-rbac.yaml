@@ -1,0 +1,28 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cicd-deployer-role
+  namespace: telecom-apps
+rules:
+  # 1. Permisiuni complete (CRUD) DOAR pe resursele standard de aplicație
+  - apiGroups: ["", "apps", "autoscaling", "networking.k8s.io", "policy"]
+    resources: ["deployments", "pods", "services", "ingresses", "configmaps", "horizontalpodautoscalers", "poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # 2. Permisiuni Write-Only pe Secrete. Jenkins face doar deploy, nu le citește înapoi.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cicd-deployer-binding
+  namespace: telecom-apps
+subjects:
+  - kind: Group
+    name: cicd-deployers # Maparea din aws-auth
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: cicd-deployer-role
+  apiGroup: rbac.authorization.k8s.io

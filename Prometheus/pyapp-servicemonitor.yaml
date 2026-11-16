@@ -1,0 +1,27 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: pyapp-servicemonitor
+  namespace: telecom-apps  # Același namespace cu aplicația ta
+  labels:
+    release: monitoring    # CRITIC: Selectorul pentru Prometheus Operator
+spec:
+  # Definim exact unde căutăm Service-ul (nu lăsăm la ghici)
+  namespaceSelector:
+    matchNames:
+      - telecom-apps
+  selector:
+    matchLabels:
+      app: pyapp     # Trebuie să se potrivească cu label-urile Service-ului tău
+  endpoints:
+    - port: port-svc-pyapp    # Trebuie să se potrivească EXACT cu NUMELE portului din Service-ul tău, nu cu numărul (8000)
+      path: /metrics        # Endpoint-ul unde expune Python metricile
+      scheme: http          # Explicităm protocolul (în bănci des folosim https + mTLS aici)
+      interval: 15s         # La cât timp vine Prometheus să facă scrape
+      scrapeTimeout: 10s    # Dacă aplicația nu dă metricele în 10s, Prometheus închide conexiunea, prevenind blocajele în cascadă. (Trebuie să fie mai mic decât intervalul!)
+
+      # Opțional: drop la metrice inutile pentru a salva RAM în Prometheus
+      # metricRelabelings:
+      #   - sourceLabels: [__name__]
+      #     regex: 'go_.*' # Ignorăm metricele interne Go dacă aplicația era de Go și ne interesează doar metricele de business
+      #     action: drop

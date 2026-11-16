@@ -1,0 +1,48 @@
+# Client de test temporar (kcat) cu identitatea logstash-consumer.
+# Folosit pentru a verifica fluxul pyapp -> Fluent Bit -> Kafka și ACL-urile.
+# Se șterge după test: kubectl delete -f Kafka/kcat-debug.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kafka-debug-client
+  namespace: logging
+  labels:
+    app: kafka-debug-client
+spec:
+  nodeSelector:
+    workload: apps
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: kcat
+      image: edenhill/kcat:1.7.1
+      command: ["sleep", "3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 200m
+          memory: 64Mi
+      volumeMounts:
+        - name: kafka-cluster-ca
+          mountPath: /certs/ca
+          readOnly: true
+        - name: kafka-user
+          mountPath: /certs/user
+          readOnly: true
+  volumes:
+    - name: kafka-cluster-ca
+      secret:
+        secretName: kafka-cluster-ca
+    - name: kafka-user
+      secret:
+        secretName: logstash-consumer

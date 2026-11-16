@@ -1,0 +1,94 @@
+# =============================================================================
+# Elasticsearch + Kibana (ECK), un nod, pe data-nodes.
+# ECK activează implicit TLS pe HTTP (CA generat de operator) și autentificarea:
+# encryption in transit și acces doar cu utilizator, fără configurare suplimentară.
+# =============================================================================
+apiVersion: elasticsearch.k8s.elastic.co/v1
+kind: Elasticsearch
+metadata:
+  name: logs
+  namespace: logging
+spec:
+  version: 9.5.6
+  nodeSets:
+    - name: default
+      count: 1   # lab; producție: 3 noduri master-eligible pe AZ-uri diferite
+      config:
+        # Fără mmap, nu e nevoie de vm.max_map_count=262144 pe nod (care cere un init container privilegiat).
+        # Producție: mmap activ, sysctl setat pe nod (launch template / DaemonSet).
+        node.store.allow_mmap: false
+      podTemplate:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: workload
+                        operator: In
+                        values: ["data"]
+          tolerations:
+            - key: dedicated
+              operator: Equal
+              value: data
+              effect: NoSchedule
+          containers:
+            - name: elasticsearch
+              env:
+                # Heap = ~50% din memorie; restul pentru page cache (Lucene citește segmentele prin OS).
+                - name: ES_JAVA_OPTS
+                  value: "-Xms768m -Xmx768m"
+              resources:
+                requests:
+                  cpu: 250m
+                  memory: 1536Mi
+                limits:
+                  cpu: 1000m
+                  memory: 1536Mi
+      volumeClaimTemplates:
+        - metadata:
+            name: elasticsearch-data   # numele cerut de ECK pentru volumul de date
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            storageClassName: gp3-storage
+            resources:
+              requests:
+                storage: 10Gi
+---
+apiVersion: kibana.k8s.elastic.co/v1
+kind: Kibana
+metadata:
+  name: logs
+  namespace: logging
+spec:
+  version: 9.5.6
+  count: 1
+  elasticsearchRef:
+    name: logs        # ECK conectează Kibana la Elasticsearch (utilizator de serviciu + CA)
+  podTemplate:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: workload
+                    operator: In
+                    values: ["data"]
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: data
+          effect: NoSchedule
+      containers:
+        - name: kibana
+          env:
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=700"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 768Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi

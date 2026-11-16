@@ -1,0 +1,64 @@
+# =============================================================================
+# Identitățile clienților Kafka (mTLS + ACL + quotas).
+# Stau în namespace-ul logging, urmărit de User Operator (userOperator.watchedNamespace):
+# Secret-ul cu certificatul fiecărui client este creat în același namespace cu clientul.
+# Secret-ul are numele KafkaUser-ului și conține user.crt, user.key, user.p12, user.password
+# și ca.crt (CA-ul de clienți). Pentru a verifica brokerii, clienții au nevoie și de CA-ul
+# clusterului (certificat public), sincronizat în logging de Kafka/sync-cluster-ca.sh.
+# =============================================================================
+
+# Producătorul: Fluent Bit. Poate doar să scrie în topicurile 5g-network-*.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: fluent-bit-producer
+  namespace: logging
+  labels:
+    strimzi.io/cluster: orion-kafka
+spec:
+  authentication:
+    type: tls
+  authorization:
+    type: simple
+    acls:
+      - resource:
+          type: topic
+          name: 5g-network-
+          patternType: prefix
+        operations:
+          - Write
+          - Describe
+  quotas:
+    # Un producător scăpat de sub control (log storm) nu poate satura brokerul.
+    producerByteRate: 1048576     # 1 MiB/s
+---
+# Consumatorul: Logstash (faza de indexare în Elasticsearch). Poate doar să citească,
+# și doar în consumer group-ul lui.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  name: logstash-consumer
+  namespace: logging
+  labels:
+    strimzi.io/cluster: orion-kafka
+spec:
+  authentication:
+    type: tls
+  authorization:
+    type: simple
+    acls:
+      - resource:
+          type: topic
+          name: 5g-network-
+          patternType: prefix
+        operations:
+          - Read
+          - Describe
+      - resource:
+          type: group
+          name: logstash-es
+          patternType: literal
+        operations:
+          - Read
+  quotas:
+    consumerByteRate: 2097152     # 2 MiB/s
